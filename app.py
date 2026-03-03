@@ -7,7 +7,7 @@ import warnings
 import time
 import os
 
-# 💡 [구글 연동용 라이브러리]
+# [구글 연동용 라이브러리]
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -17,44 +17,47 @@ if 'recent_entries' not in st.session_state:
     st.session_state.recent_entries = []
 
 # =====================================================================
-# 1. 🌐 구글 스프레드시트 연결 셋팅 (하이브리드 모드)
+# 1. 🌐 구글 연결 & 데이터 최적화 (초고속 캐싱 적용)
 # =====================================================================
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
+# 💡 한 번 연결한 구글 서버는 1시간 동안 계속 유지합니다! (속도 10배 향상)
+@st.cache_resource(ttl=3600)
+def init_google_connection():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    key_file = 'disco-arcana-489123-u3-f20de925b249.json'
+    
+    if os.path.exists(key_file):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(key_file, scope)
+    else:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    
+    client = gspread.authorize(creds)
+    # 직접 올려주신 구글 시트 주소
+    SHEET_URL = "https://docs.google.com/spreadsheets/d/1VSzc14zjG9FP16xSyqZJl1Fqy_lpJhBD6I8T_yHzoSo/edit"
+    doc = client.open_by_url(SHEET_URL)
+    
+    ws_t = doc.worksheet('transactions')
+    ws_f = doc.worksheet('fixed_expenses')
+    ws_c = doc.worksheet('payment_checks')
+    return ws_t, ws_f, ws_c
 
-# 💡 다운받으신 열쇠 파일명
-key_file = 'disco-arcana-489123-u3-f20de925b249.json'
+ws_trans, ws_fixed, ws_checks = init_google_connection()
 
-# 💡 [핵심 에러 해결] 내 PC에 파일이 있는지 먼저 확인합니다.
-if os.path.exists(key_file):
-    # 1. 파일이 있으면: 내 PC 환경이므로 JSON 파일에서 바로 열쇠를 꺼냅니다.
-    creds = ServiceAccountCredentials.from_json_keyfile_name(key_file, scope)
-else:
-    # 2. 파일이 없으면: 클라우드(GitHub) 환경이므로 안전한 비밀 금고에서 꺼냅니다.
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-
-client = gspread.authorize(creds)
-
-# 💡 만들어두신 구글 시트 주소
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1VSzc14zjG9FP16xSyqZJl1Fqy_lpJhBD6I8T_yHzoSo/edit"
-doc = client.open_by_url(SHEET_URL)
-
-ws_trans = doc.worksheet('transactions')
-ws_fixed = doc.worksheet('fixed_expenses')
-ws_checks = doc.worksheet('payment_checks')
-
-# 데이터베이스 컬럼(기둥) 정의
 T_COLS = ['id', 'date', 'type', 'content', 'category', 'payment_method', 'amount', 'memo', 'is_fixed', 'transfer_account']
 F_COLS = ['id', 'content', 'category', 'payment_method', 'transfer_account', 'amount', 'payment_day', 'start_date', 'end_date', 'installment_months', 'memo']
 C_COLS = ['id', 'year', 'month', 'item_name', 'is_paid']
 
-# 시트에서 데이터 불러오기 함수
-def load_data(ws, cols):
-    records = ws.get_all_records()
+# 💡 데이터를 한 번 읽어오면 10초간 기억해서 구글의 에러 차단을 막습니다!
+@st.cache_data(ttl=10)
+def _fetch_records(ws_name):
+    ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
+    return ws_map[ws_name].get_all_records()
+
+def load_data(ws_name, cols):
+    records = _fetch_records(ws_name)
     if not records:
+        ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
+        ws = ws_map[ws_name]
         if not ws.row_values(1):
             ws.append_row(cols)
         return pd.DataFrame(columns=cols)
@@ -63,19 +66,22 @@ def load_data(ws, cols):
         if c not in df.columns: df[c] = ""
     return df
 
-# 시트 덮어쓰기(저장) 함수
-def rewrite_sheet(ws, df, cols):
+def rewrite_sheet(ws_name, df, cols):
+    ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
+    ws = ws_map[ws_name]
     ws.clear()
     if not df.empty:
         write_df = df[cols].fillna("").astype(str)
         ws.update([write_df.columns.values.tolist()] + write_df.values.tolist())
     else:
         ws.update([cols])
+    _fetch_records.clear() # 저장 직후에는 과거 기억을 지우고 새로고침!
 
-# 최초 접속 시 헤더 세팅
-_ = load_data(ws_trans, T_COLS)
-_ = load_data(ws_fixed, F_COLS)
-_ = load_data(ws_checks, C_COLS)
+# 최초 헤더 생성 확인
+_ = load_data('trans', T_COLS)
+_ = load_data('fixed', F_COLS)
+_ = load_data('checks', C_COLS)
+
 
 # =====================================================================
 # 2. UI 및 환경 셋팅
@@ -97,6 +103,7 @@ MY_ACCOUNTS = [
 ]
 
 ALL_CATEGORIES = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "치료/예방", "여행", "차량", "할부", "대출", "주거", "통신", "월결제", "보험", "급여", "부수입", "상여금", "용돈", "금융소득", "저축", "투자", "카드대금", "단순이체", "기타"]
+
 PAYMENT_METHODS = ["현대카드", "우리카드", "국민카드", "삼성카드", "현금", "체크카드", "자동이체", "계좌입금", "계좌이체", "기타"]
 
 def safe_format(val):
@@ -115,7 +122,7 @@ selected_month = st.sidebar.selectbox("월", list(range(1, 13)), index=current_m
 st.sidebar.divider()
 st.sidebar.write("### 💾 데이터베이스 (구글 시트)")
 st.sidebar.info("데이터는 모두 구글 시트에 실시간으로 자동 저장됩니다.")
-st.sidebar.markdown(f"[엑셀(구글시트) 원본 열기]({SHEET_URL})")
+st.sidebar.markdown(f"[엑셀(구글시트) 원본 열기](https://docs.google.com/spreadsheets/d/1VSzc14zjG9FP16xSyqZJl1Fqy_lpJhBD6I8T_yHzoSo/edit)")
 
 target_month_str = f"{selected_year}년 {selected_month}월"
 st.subheader(f"📊 {target_month_str} 요약 및 관리")
@@ -144,6 +151,7 @@ with tab1:
             pay_options = ["계좌이체", "현금", "기타"]
         else:
             cat_options = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "치료/예방", "여행", "차량", "할부", "기타"]
+
             pay_options = PAYMENT_METHODS
 
         t_content = st.text_input("내용 (예: 세탁기 구매, 월급 등)")
@@ -158,6 +166,7 @@ with tab1:
             else:
                 new_id = int(time.time() * 1000000)
                 ws_trans.append_row([new_id, t_date.strftime("%Y-%m-%d"), t_type, t_content, t_category, t_method, t_amount, t_memo, 0, ""])
+                _fetch_records.clear() # 추가 후 기억 지우기
                 st.success("✅ 수동 기입 완료! (구글 시트에 저장됨)")
                 
                 new_entry = {
@@ -193,6 +202,7 @@ with tab1:
                     final_account = "" if f_account == "지정 안 함" else f_account
                     start_str = f_start.strftime("%Y-%m-%d")
                     ws_fixed.append_row([new_id, f_content, f_cat, f_method, final_account, f_amount, f_pay_day, start_str, f_end_str, f_months, f_memo])
+                    _fetch_records.clear()
                     st.success("✅ 추가되었습니다! 아래 목록에 반영됩니다.")
                     st.rerun()
 
@@ -200,7 +210,7 @@ with tab1:
     st.write("### 📋 현재 등록된 고정비/할부 목록 관리")
     st.caption("항목을 선택하고 Delete 키를 누르면 삭제할 수 있습니다.")
 
-    fixed_df = load_data(ws_fixed, F_COLS)
+    fixed_df = load_data('fixed', F_COLS)
     
     if not fixed_df.empty:
         status_list = []
@@ -259,7 +269,6 @@ with tab1:
                 for _, row in save_df.iterrows():
                     c_val = str(row.get('content', '')).strip()
                     if not c_val or c_val in ('None', 'nan'): continue
-                    
                     acct = str(row.get('transfer_account', '')).strip()
                     if acct in ('지정 안 함', 'None', 'nan'): acct = ""
                     
@@ -279,7 +288,7 @@ with tab1:
                         'installment_months': row['installment_months'], 'memo': row['memo']
                     })
                     
-                rewrite_sheet(ws_fixed, pd.DataFrame(combined_list), F_COLS)
+                rewrite_sheet('fixed', pd.DataFrame(combined_list), F_COLS)
                 st.success("✅ 구글 시트에 반영되었습니다!")
                 st.rerun() 
         else:
@@ -288,11 +297,11 @@ with tab1:
         st.info("등록된 고정비/할부가 없습니다.")
 
 with tab2:
-    df = load_data(ws_trans, T_COLS)
+    df = load_data('trans', T_COLS)
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     month_df = df[(df['date'].dt.year == selected_year) & (df['date'].dt.month == selected_month)].copy()
     
-    fixed_df = load_data(ws_fixed, F_COLS)
+    fixed_df = load_data('fixed', F_COLS)
     dynamic_fixed_rows = []
     
     for _, row in fixed_df.iterrows():
@@ -387,7 +396,7 @@ with tab2:
             all_cats = chk_df['카테고리'].unique().tolist()
             selected_cats = st.multiselect("🔍 볼 카테고리 필터링", all_cats, default=all_cats)
             
-            all_checks = load_data(ws_checks, C_COLS)
+            all_checks = load_data('checks', C_COLS)
             curr_checks = all_checks[(all_checks['year'] == selected_year) & (all_checks['month'] == selected_month)]
             paid_map = dict(zip(curr_checks['item_name'], curr_checks['is_paid'].astype(str) == '1'))
             
@@ -407,7 +416,7 @@ with tab2:
                     
                     for item_name, is_paid in paid_map.items():
                         new_chk_list.append({'id': int(time.time() * 1000000), 'year': selected_year, 'month': selected_month, 'item_name': item_name, 'is_paid': 1 if is_paid else 0})
-                    rewrite_sheet(ws_checks, pd.DataFrame(new_chk_list), C_COLS)
+                    rewrite_sheet('checks', pd.DataFrame(new_chk_list), C_COLS)
                     st.success("✅ 구글 시트에 저장되었습니다!")
                     st.rerun()
             else: st.info("선택하신 카테고리에 해당하는 내역이 없습니다.")
@@ -500,7 +509,7 @@ with tab2:
         display_df = month_df.copy()
         display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
         display_df = display_df[['date', 'content', 'type', 'category', 'payment_method', 'transfer_account', 'amount', 'memo', 'is_fixed']]
-        display_df.columns = ['날짜', '내용(품목)', '구분', '카테고리', '결제방식', '정보(고정비)', '금액', '비고', '자동계산여부']
+        display_df.columns = ['날짜', '내용(품목)', '구분', '카테고리', '결제방식', '계좌정보(고정비)', '금액', '비고', '자동계산여부']
         display_df['금액'] = display_df['금액'].apply(safe_format)
         st.dataframe(display_df.sort_values(by='날짜', ascending=False), use_container_width=True, hide_index=True)
 
@@ -508,7 +517,7 @@ with tab2:
         with st.expander("🛠️ 이번 달 수동 기입 내역 수정 및 삭제 (잘못 입력한 항목 고치기)", expanded=False):
             st.info("수동으로 기입한 내역만 이곳에서 수정/삭제할 수 있습니다.")
             
-            all_trans = load_data(ws_trans, T_COLS)
+            all_trans = load_data('trans', T_COLS)
             all_trans['date'] = pd.to_datetime(all_trans['date'], errors='coerce')
             curr_manual = all_trans[(all_trans['date'].dt.year == selected_year) & (all_trans['date'].dt.month == selected_month) & (~all_trans['is_fixed'].astype(str).str.lower().isin(['1', 'true']))].copy()
             
@@ -533,9 +542,8 @@ with tab2:
                             'content': content_val, 'category': row['카테고리'], 'payment_method': row['결제방식'],
                             'amount': safe_amt, 'memo': row.get('비고', ''), 'is_fixed': 0, 'transfer_account': ""
                         })
-                    rewrite_sheet(ws_trans, pd.DataFrame(new_tx_list), T_COLS)
+                    rewrite_sheet('trans', pd.DataFrame(new_tx_list), T_COLS)
                     st.success("✅ 구글 시트에 수정/삭제가 반영되었습니다!")
                     st.rerun() 
             else: st.info("이번 달에 수동으로 기입한 내역이 없습니다.")
-
     else: st.info(f"{target_month_str}의 데이터가 없습니다.")
