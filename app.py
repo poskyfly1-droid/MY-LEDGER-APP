@@ -17,9 +17,8 @@ if 'recent_entries' not in st.session_state:
     st.session_state.recent_entries = []
 
 # =====================================================================
-# 1. 🌐 구글 연결 & 데이터 최적화 (초고속 캐싱 적용)
+# 1. 🌐 구글 연결 & 데이터 최적화 (자동 재시도 방어막 탑재)
 # =====================================================================
-# 💡 한 번 연결한 구글 서버는 1시간 동안 계속 유지합니다! (속도 10배 향상)
 @st.cache_resource(ttl=3600)
 def init_google_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -32,7 +31,6 @@ def init_google_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     
     client = gspread.authorize(creds)
-    # 직접 올려주신 구글 시트 주소
     SHEET_URL = "https://docs.google.com/spreadsheets/d/1VSzc14zjG9FP16xSyqZJl1Fqy_lpJhBD6I8T_yHzoSo/edit"
     doc = client.open_by_url(SHEET_URL)
     
@@ -47,35 +45,50 @@ T_COLS = ['id', 'date', 'type', 'content', 'category', 'payment_method', 'amount
 F_COLS = ['id', 'content', 'category', 'payment_method', 'transfer_account', 'amount', 'payment_day', 'start_date', 'end_date', 'installment_months', 'memo']
 C_COLS = ['id', 'year', 'month', 'item_name', 'is_paid']
 
-# 💡 데이터를 한 번 읽어오면 10초간 기억해서 구글의 에러 차단을 막습니다!
+# 💡 [핵심 방어막] 구글이 튕겨내면 1초 쉬고 다시 시도 (최대 3번)
 @st.cache_data(ttl=10)
 def _fetch_records(ws_name):
     ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
-    return ws_map[ws_name].get_all_records()
+    for attempt in range(3):
+        try:
+            return ws_map[ws_name].get_all_records()
+        except Exception:
+            time.sleep(1) # 에러 나면 1초 대기 후 재시도
+    return [] # 3번 다 실패하면 빈 목록 반환 (앱 다운 방지)
 
 def load_data(ws_name, cols):
     records = _fetch_records(ws_name)
     if not records:
         ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
         ws = ws_map[ws_name]
-        if not ws.row_values(1):
-            ws.append_row(cols)
+        try:
+            if not ws.row_values(1):
+                ws.append_row(cols)
+        except Exception:
+            pass
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(records)
     for c in cols:
         if c not in df.columns: df[c] = ""
     return df
 
+# 💡 [핵심 방어막] 저장할 때도 튕김 방지 + 저장 후 구글 서버가 숨 돌릴 시간 1초 부여
 def rewrite_sheet(ws_name, df, cols):
     ws_map = {'trans': ws_trans, 'fixed': ws_fixed, 'checks': ws_checks}
     ws = ws_map[ws_name]
-    ws.clear()
-    if not df.empty:
-        write_df = df[cols].fillna("").astype(str)
-        ws.update([write_df.columns.values.tolist()] + write_df.values.tolist())
-    else:
-        ws.update([cols])
-    _fetch_records.clear() # 저장 직후에는 과거 기억을 지우고 새로고침!
+    for attempt in range(3):
+        try:
+            ws.clear()
+            if not df.empty:
+                write_df = df[cols].fillna("").astype(str)
+                ws.update([write_df.columns.values.tolist()] + write_df.values.tolist())
+            else:
+                ws.update([cols])
+            _fetch_records.clear()
+            time.sleep(1) # 쓰기 완료 후 즉시 읽으면 에러나므로 1초 대기
+            return
+        except Exception:
+            time.sleep(1)
 
 # 최초 헤더 생성 확인
 _ = load_data('trans', T_COLS)
@@ -103,7 +116,6 @@ MY_ACCOUNTS = [
 ]
 
 ALL_CATEGORIES = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "치료/예방", "여행", "차량", "할부", "대출", "주거", "통신", "월결제", "보험", "급여", "부수입", "상여금", "용돈", "금융소득", "저축", "투자", "카드대금", "단순이체", "기타"]
-
 PAYMENT_METHODS = ["현대카드", "우리카드", "국민카드", "삼성카드", "현금", "체크카드", "자동이체", "계좌입금", "계좌이체", "기타"]
 
 def safe_format(val):
@@ -165,8 +177,12 @@ with tab1:
             elif t_amount == 0: st.error("⚠️ 금액을 1원 이상 입력해 주세요!")
             else:
                 new_id = int(time.time() * 1000000)
-                ws_trans.append_row([new_id, t_date.strftime("%Y-%m-%d"), t_type, t_content, t_category, t_method, t_amount, t_memo, 0, ""])
-                _fetch_records.clear() # 추가 후 기억 지우기
+                # 시트 저장 후 1초 대기
+                try: ws_trans.append_row([new_id, t_date.strftime("%Y-%m-%d"), t_type, t_content, t_category, t_method, t_amount, t_memo, 0, ""])
+                except Exception: pass
+                _fetch_records.clear()
+                time.sleep(1) 
+                
                 st.success("✅ 수동 기입 완료! (구글 시트에 저장됨)")
                 
                 new_entry = {
@@ -201,8 +217,11 @@ with tab1:
                     new_id = int(time.time() * 1000000)
                     final_account = "" if f_account == "지정 안 함" else f_account
                     start_str = f_start.strftime("%Y-%m-%d")
-                    ws_fixed.append_row([new_id, f_content, f_cat, f_method, final_account, f_amount, f_pay_day, start_str, f_end_str, f_months, f_memo])
+                    try: ws_fixed.append_row([new_id, f_content, f_cat, f_method, final_account, f_amount, f_pay_day, start_str, f_end_str, f_months, f_memo])
+                    except Exception: pass
                     _fetch_records.clear()
+                    time.sleep(1)
+                    
                     st.success("✅ 추가되었습니다! 아래 목록에 반영됩니다.")
                     st.rerun()
 
@@ -416,6 +435,7 @@ with tab2:
                     
                     for item_name, is_paid in paid_map.items():
                         new_chk_list.append({'id': int(time.time() * 1000000), 'year': selected_year, 'month': selected_month, 'item_name': item_name, 'is_paid': 1 if is_paid else 0})
+                    
                     rewrite_sheet('checks', pd.DataFrame(new_chk_list), C_COLS)
                     st.success("✅ 구글 시트에 저장되었습니다!")
                     st.rerun()
