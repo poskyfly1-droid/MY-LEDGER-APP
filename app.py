@@ -83,8 +83,20 @@ _ = load_data(ws_checks, C_COLS)
 st.set_page_config(page_title="짜장당근 가계부 (클라우드)", layout="wide")
 st.title("☁️ 짜장당근 맞춤형 가계부 (Google 연동됨)")
 
-MY_ACCOUNTS = ["지정 안 함", "농협 3120111632011", "국민은행 1234-56-7890", "신한은행 110-123-456789", "우리은행 1002-123-456789", "카카오뱅크 3333-01-2345678"]
-ALL_CATEGORIES = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "차량", "할부", "대출", "주거", "통신", "월결제", "보험", "급여", "부수입", "상여금", "용돈", "금융소득", "저축", "투자", "카드대금", "단순이체", "기타"]
+MY_ACCOUNTS = [
+    "지정 안 함",
+    "농협 3120111632011",
+    "국민은행 659401-01-585635",
+    "하나은행 36791039350407",
+    "우리은행 1002557320818",
+    "신한은행 110-367-020370",
+    "카카오뱅크(혜경) 3333-01-5988576",
+    "농협 3120111632011",
+    "카카오뱅크(정민) 3333-17-5922472",
+    "토스뱅크 1000-7396-8428",
+]
+
+ALL_CATEGORIES = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "치료/예방", "여행", "차량", "할부", "대출", "주거", "통신", "월결제", "보험", "급여", "부수입", "상여금", "용돈", "금융소득", "저축", "투자", "카드대금", "단순이체", "기타"]
 PAYMENT_METHODS = ["현대카드", "우리카드", "국민카드", "삼성카드", "현금", "체크카드", "자동이체", "계좌입금", "계좌이체", "기타"]
 
 def safe_format(val):
@@ -131,7 +143,7 @@ with tab1:
             cat_options = ["저축", "투자", "카드대금", "단순이체", "기타"]
             pay_options = ["계좌이체", "현금", "기타"]
         else:
-            cat_options = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "차량", "할부", "기타"]
+            cat_options = ["식비", "생활", "교통", "미용", "문화생활", "짜장당근", "치료/예방", "여행", "차량", "할부", "기타"]
             pay_options = PAYMENT_METHODS
 
         t_content = st.text_input("내용 (예: 세탁기 구매, 월급 등)")
@@ -488,7 +500,7 @@ with tab2:
         display_df = month_df.copy()
         display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
         display_df = display_df[['date', 'content', 'type', 'category', 'payment_method', 'transfer_account', 'amount', 'memo', 'is_fixed']]
-        display_df.columns = ['날짜', '내용(품목)', '구분', '카테고리', '결제방식', '계좌정보(고정비)', '금액', '비고', '자동계산여부']
+        display_df.columns = ['날짜', '내용(품목)', '구분', '카테고리', '결제방식', '정보(고정비)', '금액', '비고', '자동계산여부']
         display_df['금액'] = display_df['금액'].apply(safe_format)
         st.dataframe(display_df.sort_values(by='날짜', ascending=False), use_container_width=True, hide_index=True)
 
@@ -525,4 +537,5 @@ with tab2:
                     st.success("✅ 구글 시트에 수정/삭제가 반영되었습니다!")
                     st.rerun() 
             else: st.info("이번 달에 수동으로 기입한 내역이 없습니다.")
+
     else: st.info(f"{target_month_str}의 데이터가 없습니다.")
